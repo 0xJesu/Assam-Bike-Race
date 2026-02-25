@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Assam Tea Garden Run - Tilt Enabled</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #000;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: none;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        #score-board {
+            padding: 20px;
+            font-size: 24px;
+            color: white;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px #000000;
+            background: linear-gradient(to bottom, rgba(0,0,0,0.5), transparent);
+            text-align: center;
+        }
+
+        #debug-info {
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.5);
+            text-align: center;
+            margin-bottom: 5px;
+        }
+
+        .screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            pointer-events: auto;
+            color: white;
+            z-index: 10;
+        }
+
+        h1 { margin: 0 0 10px 0; color: #4CAF50; font-size: 2rem; text-transform: uppercase; letter-spacing: 2px; text-align: center;}
+        p { font-size: 1.1rem; color: #ddd; max-width: 90%; text-align: center; margin-bottom: 30px; line-height: 1.5;}
+        
+        button {
+            padding: 15px 40px;
+            font-size: 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(76, 175, 80, 0.4);
+            text-transform: uppercase;
+            font-weight: bold;
+            transition: transform 0.1s;
+        }
+        button:active { background-color: #3e8e41; transform: scale(0.95); }
+
+        #game-over { display: none; }
+        #start-screen { display: flex; }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div id="score-board">Distance: 0 m</div>
+        <div id="debug-info">Waiting for Tilt...</div>
+    </div>
+
+    <div id="start-screen" class="screen">
+        <h1>Assam Run</h1>
+        <p>
+            1. Hold your phone horizontally.<br>
+            2. <b>Tilt Left/Right</b> to steer.<br>
+            <span style="font-size:0.8em; opacity:0.7">(Touch controls also enabled)</span>
+        </p>
+        <button id="start-btn">Tap to Start</button>
+    </div>
+
+    <div id="game-over" class="screen">
+        <h1 style="color: #ff4444;">CRASHED!</h1>
+        <p id="final-score">Distance: 0 m</p>
+        <button id="restart-btn">Try Again</button>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+
+        // --- Configuration ---
+        const CONFIG = {
+            speed: 0.8,
+            laneWidth: 14,
+            steerSpeed: 0.35,
+            fogDensity: 0.02,
+            colors: {
+                teaGreen: 0x4A7023,     
+                mist: 0xD8E6E0,         
+                river: 0x2B65EC,        
+                road: 0x3d3d3d,
+                obstacle: 0xD32F2F      
+            }
+        };
+
+        // --- Globals ---
+        let scene, camera, renderer;
+        let bike;
+        let obstacles = [];
+        let teaBushes = [];
+        let ground, river;
+        let score = 0;
+        let isGameOver = false;
+        let isPlaying = false;
+        
+        // Input State
+        const input = { left: false, right: false, tilt: 0 };
+
+        // --- Initialization ---
+        function init() {
+            // Scene
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(CONFIG.colors.mist, CONFIG.fogDensity);
+            scene.background = new THREE.Color(CONFIG.colors.mist);
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 5, 10);
+            camera.lookAt(0, 0, -10);
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            // Lights
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(10, 20, 10);
+            dirLight.castShadow = true;
+            scene.add(dirLight);
+
+            // World
+            createEnvironment();
+            bike = createBike();
+            scene.add(bike);
+
+            // Listeners
+            window.addEventListener('resize', onWindowResize);
+            
+            // KEYBOARD
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+            
+            // TOUCH (Backup)
+            document.addEventListener('touchstart', onTouchStart, { passive: false });
+            document.addEventListener('touchend', onTouchEnd, { passive: false });
+            
+            // Buttons
+            document.getElementById('start-btn').addEventListener('click', startGame);
+            document.getElementById('restart-btn').addEventListener('click', resetGame);
+
+            animate();
+        }
+
+        // ==========================================
+        // TILT SENSOR LOGIC (Requires HTTPS)
+        // ==========================================
+        function requestMotionPermission() {
+            // iOS 13+ Permissions
+            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                DeviceOrientationEvent.requestPermission()
+                .then(response => {
+                    if (response === 'granted') {
+                        window.addEventListener('deviceorientation', handleOrientation);
+                        document.getElementById('debug-info').innerText = "Tilt Sensor Active";
+                    } else {
+                        alert("Tilt permission denied. Use Touch.");
+                    }
+                })
+                .catch(console.error);
+            } else {
+                // Android / Non-iOS
+                window.addEventListener('deviceorientation', handleOrientation);
+                document.getElementById('debug-info').innerText = "Tilt Sensor Active";
+            }
+        }
+
+        function handleOrientation(event) {
+            const tilt = event.gamma; // Left-Right tilt in degrees
+            
+            if (tilt === null) return;
+
+            // Normalize: 30 degrees tilt = Max turn speed
+            let normalizedTilt = tilt / 30;
+            
+            // Clamp between -1 and 1
+            if (normalizedTilt > 1) normalizedTilt = 1;
+            if (normalizedTilt < -1) normalizedTilt = -1;
+
+            // Deadzone (ignore tiny shakes)
+            if (Math.abs(normalizedTilt) < 0.1) normalizedTilt = 0;
+
+            input.tilt = normalizedTilt;
+        }
+        // ==========================================
+
+        function onTouchStart(e) {
+            e.preventDefault(); 
+            for (let i = 0; i < e.touches.length; i++) {
+                if (e.touches[i].clientX < window.innerWidth / 2) input.left = true;
+                else input.right = true;
+            }
+        }
+
+        function onTouchEnd(e) {
+            e.preventDefault();
+            if (e.touches.length === 0) {
+                input.left = false;
+                input.right = false;
+            }
+        }
+
+        function createEnvironment() {
+            const groundGeo = new THREE.PlaneGeometry(1000, 1000);
+            const groundMat = new THREE.MeshStandardMaterial({ color: CONFIG.colors.teaGreen, roughness: 0.8 });
+            ground = new THREE.Mesh(groundGeo, groundMat);
+            ground.rotation.x = -Math.PI / 2;
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+            const roadGeo = new THREE.PlaneGeometry(CONFIG.laneWidth, 1000);
+            const roadMat = new THREE.MeshStandardMaterial({ color: CONFIG.colors.road });
+            const road = new THREE.Mesh(roadGeo, roadMat);
+            road.rotation.x = -Math.PI / 2;
+            road.position.y = 0.01;
+            scene.add(road);
+
+            const riverGeo = new THREE.PlaneGeometry(500, 2000);
+            const riverMat = new THREE.MeshBasicMaterial({ color: CONFIG.colors.river });
+            river = new THREE.Mesh(riverGeo, riverMat);
+            river.rotation.x = -Math.PI / 2;
+            river.position.set(300, -2, 0);
+            scene.add(river);
+        }
+
+        function createBike() {
+            const bikeGroup = new THREE.Group();
+            const bodyMat = new THREE.MeshStandardMaterial({ color: 0x333333 });
+            const tankMat = new THREE.MeshStandardMaterial({ color: 0xFF0000 });
+            const chromeMat = new THREE.MeshStandardMaterial({ color: 0xCCCCCC, metalness: 0.8 });
+
+            const chassis = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 1.2), bodyMat);
+            chassis.position.y = 0.7;
+            chassis.castShadow = true;
+            bikeGroup.add(chassis);
+
+            const tank = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.4, 0.8), tankMat);
+            tank.position.set(0, 1.0, 0.2);
+            bikeGroup.add(tank);
+
+            const wheelGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.2, 16);
+            wheelGeo.rotateZ(Math.PI / 2);
+            const frontWheel = new THREE.Mesh(wheelGeo, bodyMat);
+            frontWheel.position.set(0, 0.4, -0.8);
+            bikeGroup.add(frontWheel);
+            const rearWheel = new THREE.Mesh(wheelGeo, bodyMat);
+            rearWheel.position.set(0, 0.4, 0.8);
+            bikeGroup.add(rearWheel);
+
+            const handleBar = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.05, 0.05), chromeMat);
+            handleBar.position.set(0, 1.1, -0.4);
+            bikeGroup.add(handleBar);
+
+            return bikeGroup;
+        }
+
+        function createObstacle(zPosition) {
+            const xPos = (Math.random() * CONFIG.laneWidth) - (CONFIG.laneWidth / 2);
+            const geo = new THREE.BoxGeometry(1.5, 1.5, 1.5);
+            const mat = new THREE.MeshStandardMaterial({ color: CONFIG.colors.obstacle });
+            const obstacle = new THREE.Mesh(geo, mat);
+            obstacle.position.set(xPos, 0.75, zPosition);
+            obstacle.castShadow = true;
+            obstacle.receiveShadow = true;
+            scene.add(obstacle);
+            obstacles.push(obstacle);
+        }
+
+        function createTeaBush(zPosition) {
+            const isLeft = Math.random() > 0.5;
+            const xOffset = isLeft ? - (Math.random() * 20 + 10) : (Math.random() * 20 + 10);
+            const geo = new THREE.DodecahedronGeometry(Math.random() * 1.5 + 0.5);
+            const mat = new THREE.MeshStandardMaterial({ color: 0x2E8B57 });
+            const bush = new THREE.Mesh(geo, mat);
+            bush.position.set(xOffset, 0.5, zPosition);
+            scene.add(bush);
+            teaBushes.push(bush);
+        }
+
+        function onKeyDown(event) {
+            if (event.key === 'ArrowLeft' || event.key === 'a' || event.key === 'A') input.left = true;
+            if (event.key === 'ArrowRight' || event.key === 'd' || event.key === 'D') input.right = true;
+        }
+
+        function onKeyUp(event) {
+            if (event.key === 'ArrowLeft' || event.key === 'a' || event.key === 'A') input.left = false;
+            if (event.key === 'ArrowRight' || event.key === 'd' || event.key === 'D') input.right = false;
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function update() {
+            if (!isPlaying || isGameOver) return;
+
+            // Move Bike Forward
+            bike.position.z -= CONFIG.speed;
+            score += CONFIG.speed * 2;
+            document.getElementById('score-board').innerText = `Distance: ${Math.floor(score/10)} m`;
+
+            // --- Steering Logic (Combine All Inputs) ---
+            let moveDir = 0;
+            
+            // Priority: Key > Touch > Tilt
+            if (input.left) moveDir = -1;
+            else if (input.right) moveDir = 1;
+            else {
+                moveDir = input.tilt; // Use Tilt if no manual override
+            }
+
+            bike.position.x += moveDir * CONFIG.steerSpeed;
+            
+            // Banking effect
+            const targetRotation = -moveDir * 0.5; 
+            bike.rotation.z += (targetRotation - bike.rotation.z) * 0.1;
+
+            // Clamp Position
+            const limit = CONFIG.laneWidth / 2 - 0.5;
+            if (bike.position.x < -limit) bike.position.x = -limit;
+            if (bike.position.x > limit) bike.position.x = limit;
+
+            // Camera Follow
+            camera.position.z = bike.position.z + 10;
+            camera.position.x += (bike.position.x * 0.5 - camera.position.x) * 0.1;
+
+            // Infinite Floor
+            ground.position.z = bike.position.z;
+            river.position.z = bike.position.z;
+
+            // Spawning
+            if (Math.random() < 0.05) createObstacle(bike.position.z - 100);
+            if (Math.random() < 0.2) createTeaBush(bike.position.z - 100);
+
+            // Collision
+            const playerBox = new THREE.Box3().setFromObject(bike);
+            playerBox.expandByScalar(-0.3); 
+
+            for (let i = obstacles.length - 1; i >= 0; i--) {
+                const obs = obstacles[i];
+                const obsBox = new THREE.Box3().setFromObject(obs);
+                
+                if (playerBox.intersectsBox(obsBox)) {
+                    triggerGameOver();
+                }
+
+                if (obs.position.z > camera.position.z) {
+                    scene.remove(obs);
+                    obstacles.splice(i, 1);
+                }
+            }
+
+            for (let i = teaBushes.length - 1; i >= 0; i--) {
+                if (teaBushes[i].position.z > camera.position.z) {
+                    scene.remove(teaBushes[i]);
+                    teaBushes.splice(i, 1);
+                }
+            }
+        }
+
+        function startGame() {
+            // Trigger Permission Request
+            requestMotionPermission();
+            
+            document.getElementById('start-screen').style.display = 'none';
+            isPlaying = true;
+        }
+
+        function triggerGameOver() {
+            isGameOver = true;
+            document.getElementById('game-over').style.display = 'flex';
+            document.getElementById('final-score').innerText = `Distance: ${Math.floor(score/10)} m`;
+        }
+
+        function resetGame() {
+            isGameOver = false;
+            score = 0;
+            bike.position.set(0, 0, 0);
+            bike.rotation.set(0, 0, 0);
+            
+            obstacles.forEach(o => scene.remove(o));
+            obstacles = [];
+            teaBushes.forEach(b => scene.remove(b));
+            teaBushes = [];
+
+            document.getElementById('game-over').style.display = 'none';
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            update();
+            renderer.render(scene, camera);
+        }
+
+        init();
+
+    </script>
+</body>
+</html>
